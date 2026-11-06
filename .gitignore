@@ -1,0 +1,10 @@
+# Swift
+.build/
+build/
+Icon/AppIcon.iconset/
+# Node / Tauri
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+.DS_Store
