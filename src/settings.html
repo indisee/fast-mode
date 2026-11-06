@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fast Mode Settings</title>
+  <style>
+    :root {
+      --bg: #ececec; --group: #ffffff; --line: rgba(0,0,0,.08); --text: #1d1d1f;
+      --muted: rgba(0,0,0,.5); --red: #ff3b30; --accent: #0a84ff;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1e1e1e; --group: #2a2a2c; --line: rgba(255,255,255,.08); --text: #f5f5f7; --muted: rgba(255,255,255,.55); }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font: 12px/16px var(--font);
+           -webkit-user-select: none; user-select: none; cursor: default; }
+    .group { background: var(--group); border-radius: 8px; border: 1px solid var(--line); margin-bottom: 8px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; min-height: 36px; }
+    .row + .row { border-top: 1px solid var(--line); }
+    .note { color: var(--muted); font-size: 11px; line-height: 14px; padding: 0 4px 12px; }
+    .note .err { color: var(--red); display: block; margin-bottom: 2px; }
+    button, select { font: inherit; color: var(--text); }
+    .rec { min-width: 120px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--line);
+           background: var(--bg); font-weight: 500; }
+    .rec.recording { color: var(--muted); font-weight: 400; border-color: var(--accent); }
+    .clear { border: 0; background: none; color: var(--muted); font-size: 13px; padding: 0 2px; }
+    .ctrl { display: flex; align-items: center; gap: 6px; }
+    input[type=range] { width: 140px; }
+    .val { width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div class="group">
+    <div class="row">
+      <span>Send clipboard to Claude</span>
+      <span class="ctrl">
+        <button id="rec" class="rec"></button>
+        <button id="clear" class="clear" title="Remove shortcut">✕</button>
+      </span>
+    </div>
+  </div>
+  <div class="note">
+    <span id="err" class="err" hidden></span>
+    Works from any app. Click, then press a combination with ⌘, ⌥ or ⌃. Esc cancels, ⌫ removes.
+  </div>
+
+  <div class="group">
+    <div class="row">
+      <span>Model</span>
+      <select id="model">
+        <option value="">Default</option>
+        <option value="haiku">Haiku</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="opus">Opus</option>
+      </select>
+    </div>
+    <div class="row">
+      <span>Opacity when not focused</span>
+      <span class="ctrl"><input id="opacity" type="range" min="0.2" max="1" step="0.05" /><span id="opval" class="val"></span></span>
+    </div>
+    <div class="row">
+      <span>System prompt</span>
+      <button id="prompt">Edit…</button>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const { listen } = window.__TAURI__.event;
+    const $ = (id) => document.getElementById(id);
+    let settings = {}, platform = "macos", recording = false;
+
+    const MODS = ["Control", "Alt", "Shift", "Super"];
+    const MAC_SYM = { Control: "⌃", Alt: "⌥", Shift: "⇧", Super: "⌘" };
+    const PC_NAME = { Control: "Ctrl", Alt: "Alt", Shift: "Shift", Super: "Win" };
+
+    function keyName(code) {
+      if (code.startsWith("Key")) return code.slice(3);
+      if (code.startsWith("Digit")) return code.slice(5);
+      const map = { Space: "Space", Enter: "↩", Tab: "⇥", Backspace: "⌫", ArrowLeft: "←", ArrowRight: "→",
+                    ArrowUp: "↑", ArrowDown: "↓", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]",
+                    Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backslash: "\\", Backquote: "`" };
+      return map[code] ?? code;
+    }
+
+    function label(accel) {
+      if (!accel) return "";
+      const parts = accel.split("+");
+      const key = parts.pop();
+      if (platform === "macos") return parts.map((m) => MAC_SYM[m] ?? m).join("") + keyName(key);
+      return [...parts.map((m) => PC_NAME[m] ?? m), keyName(key)].join("+");
+    }
+
+    function render() {
+      $("rec").textContent = recording ? "Type shortcut…" : (label(settings.shortcut) || "Record Shortcut");
+      $("rec").classList.toggle("recording", recording);
+      $("clear").hidden = recording || !settings.shortcut;
+      $("model").value = settings.model ?? "";
+      $("opacity").value = settings.inactiveOpacity;
+      $("opval").textContent = Math.round(settings.inactiveOpacity * 100) + "%";
+    }
+
+    function showError(msg) {
+      $("err").hidden = !msg;
+      $("err").textContent = msg ? "This shortcut is taken by another app — pick a different one." : "";
+      if (msg) $("err").title = msg;
+    }
+
+    async function save(accel) {
+      try { await invoke("set_shortcut", { accel }); showError(""); }
+      catch (e) { showError(String(e)); }
+    }
+
+    function stop(resume) {
+      recording = false;
+      if (resume) invoke("resume_shortcut").catch((e) => showError(String(e)));
+      render();
+    }
+
+    $("rec").addEventListener("click", () => {
+      if (recording) return stop(true);
+      recording = true;
+      invoke("pause_shortcut");
+      render();
+    });
+    $("clear").addEventListener("click", () => save(""));
+
+    document.addEventListener("keydown", (e) => {
+      if (!recording) return;
+      e.preventDefault();
+      if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return; // wait for the real key
+      const noMods = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+      if (e.key === "Escape" && noMods) return stop(true);
+      if (e.key === "Backspace" && noMods) { stop(false); return save(""); }
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) return; // need ⌘, ⌥ or ⌃
+      const mods = [e.ctrlKey && "Control", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super"].filter(Boolean);
+      const accel = [...MODS.filter((m) => mods.includes(m)), e.code].join("+");
+      stop(false);
+      save(accel);
+    });
+
+    $("model").addEventListener("change", (e) => invoke("set_model", { model: e.target.value }));
+    $("opacity").addEventListener("input", (e) => {
+      $("opval").textContent = Math.round(e.target.value * 100) + "%";
+      invoke("set_opacity", { value: Number(e.target.value) });
+    });
+    $("prompt").addEventListener("click", () => invoke("edit_prompt"));
+
+    (async () => {
+      const snap = await invoke("get_state");
+      settings = snap.settings;
+      platform = snap.platform;
+      render();
+      await listen("settings", (e) => { settings = e.payload; if (!recording) render(); });
+    })();
+  </script>
+</body>
+</html>
