@@ -33,7 +33,6 @@ html, body {
   user-select: none;
   cursor: default;
 }
-body { transition: opacity 0.15s ease; }
 
 #card {
   position: absolute;
@@ -56,6 +55,7 @@ body { transition: opacity 0.15s ease; }
   display: flex;
   padding: 6px 7px;
   background: var(--box);
+  background: var(--proj-bg, var(--box)); /* active project color @ 0.6 */
   border: 1px solid var(--line);
   border-radius: 7px;
 }
@@ -139,6 +139,26 @@ button.icon[hidden] { display: none; }
   overflow-y: auto;
 }
 #history[hidden] { display: none; }
+#history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+#history-head[hidden] { display: none; }
+.text-btn {
+  border: 0;
+  background: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font: 12px var(--font);
+  color: var(--muted);
+  cursor: default;
+}
+.text-btn:hover { color: var(--text); }
+.text-btn:active { opacity: 0.6; }
 .empty { color: var(--faint); font-size: 12px; text-align: center; padding: 12px 0; }
 
 .row {
@@ -151,7 +171,9 @@ button.icon[hidden] { display: none; }
   flex-shrink: 0;
 }
 .row-head { display: flex; align-items: center; justify-content: space-between; }
-.date { font-size: 10px; color: var(--faint); }
+.date { font-size: 10px; color: var(--faint); margin-right: auto; }
+.proj { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); margin-right: 8px; }
+.proj .dot { width: 7px; height: 7px; border-radius: 50%; }
 .section { display: flex; align-items: flex-start; gap: 8px; }
 .section .body { flex: 1; min-width: 0; }
 .label { font-size: 9px; font-weight: 600; letter-spacing: 0.04em; color: var(--faint); }
@@ -163,3 +185,35 @@ button.icon[hidden] { display: none; }
 .row button.icon { width: 18px; height: 18px; padding: 2px; flex-shrink: 0; }
 .row button.icon.done { color: var(--green); }
 .row .del { width: 14px; height: 14px; padding: 1px; color: var(--faint); }
+
+/* raw CLI JSON: only when a row is expanded (click the row) */
+.row:not(.open) .raw-wrap { display: none; }
+.raw-wrap { display: flex; flex-direction: column; gap: 7px; }
+.json {
+  margin: 2px 0 0;
+  font: 11px/14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+}
+#error .link { color: var(--text); text-decoration: underline; padding: 0; font-size: 12px; }
+
+/* ── hotkey request: whole card in project color, big spinner only ── */
+#busy { display: none; }
+#card.busy {
+  background: linear-gradient(var(--proj-bg, var(--bg)), var(--proj-bg, var(--bg))), var(--bg);
+}
+#card.busy > :not(#busy) { display: none !important; }
+#card.busy #busy { display: grid; place-items: center; flex: 1; }
+.spinner.big {
+  width: 30px;
+  height: 30px;
+  border-width: 3px;
+  border-color: rgba(0, 0, 0, 0.15);
+  border-top-color: rgba(0, 0, 0, 0.6);
+}
+@media (prefers-color-scheme: dark) {
+  .spinner.big { border-color: rgba(255, 255, 255, 0.2); border-top-color: rgba(255, 255, 255, 0.85); }
+}

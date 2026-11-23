@@ -12,7 +12,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl,
+    AppHandle, Emitter, LogicalPosition, Manager, State, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -38,6 +38,9 @@ struct Settings {
     /// Logical top-left the user dragged the panel to.
     #[serde(default)]
     home: Option<(f64, f64)>,
+    /// Id of the project whose prompt is used.
+    #[serde(default)]
+    active_project: String,
 }
 
 fn default_opacity() -> f64 {
@@ -54,8 +57,28 @@ impl Default for Settings {
             inactive_opacity: default_opacity(),
             shortcut: default_shortcut(),
             home: None,
+            active_project: String::new(),
         }
     }
+}
+
+/// A named system prompt with a frame color. Unknown fields are kept,
+/// so newer versions can add things without older ones dropping them.
+#[derive(Serialize, Deserialize, Clone)]
+struct Project {
+    id: String,
+    name: String,
+    #[serde(default)]
+    prompt: String,
+    /// CSS color ("#ff9f0a"); empty = neutral frame.
+    #[serde(default)]
+    color: String,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string().to_uppercase()
 }
 
 /// Same shape as the Swift v1 history.json, so history carries over.
@@ -65,11 +88,20 @@ struct HistoryItem {
     date: String,
     request: String,
     response: String,
+    /// Full `claude -p --output-format json` result (cost, usage, session, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw: Option<serde_json::Value>,
+    /// Project name/color at the time of the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 struct AppState {
     dir: PathBuf,
     settings: Mutex<Settings>,
+    projects: Mutex<Vec<Project>>,
     history: Mutex<Vec<HistoryItem>>,
     child_pid: Mutex<Option<u32>>,
     cancelled: AtomicBool,
@@ -84,15 +116,29 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("FastMode");
         let _ = std::fs::create_dir_all(&dir);
-        let prompt = dir.join("system-prompt.md");
-        if !prompt.exists() {
-            let _ = std::fs::write(&prompt, DEFAULT_PROMPT);
+        let mut settings: Settings = read_json(&dir.join("settings.json")).unwrap_or_default();
+        let mut projects: Vec<Project> = read_json(&dir.join("projects.json")).unwrap_or_default();
+        if projects.is_empty() {
+            // First run of the projects version: adopt the old single prompt.
+            let prompt = std::fs::read_to_string(dir.join("system-prompt.md"))
+                .unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
+            projects.push(Project {
+                id: new_id(),
+                name: "Default".into(),
+                prompt,
+                color: String::new(),
+                extra: Default::default(),
+            });
+            write_json(&dir.join("projects.json"), &projects);
         }
-        let settings = read_json(&dir.join("settings.json")).unwrap_or_default();
+        if !projects.iter().any(|p| p.id == settings.active_project) {
+            settings.active_project = projects[0].id.clone();
+        }
         let history = read_json(&dir.join("history.json")).unwrap_or_default();
         Self {
             dir,
             settings: Mutex::new(settings),
+            projects: Mutex::new(projects),
             history: Mutex::new(history),
             child_pid: Mutex::new(None),
             cancelled: AtomicBool::new(false),
@@ -101,8 +147,14 @@ impl AppState {
         }
     }
 
-    fn prompt_path(&self) -> PathBuf {
-        self.dir.join("system-prompt.md")
+    fn active_project(&self) -> Project {
+        let id = self.settings.lock().unwrap().active_project.clone();
+        let projects = self.projects.lock().unwrap();
+        projects.iter().find(|p| p.id == id).unwrap_or(&projects[0]).clone()
+    }
+
+    fn save_projects(&self) {
+        write_json(&self.dir.join("projects.json"), &*self.projects.lock().unwrap());
     }
 
     fn save_settings(&self) {
@@ -212,20 +264,18 @@ async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Result
     if text.is_empty() {
         return Err("Nothing to send".into());
     }
-    let exe = {
-        let mut cached = state.claude.lock().unwrap();
-        if cached.is_none() {
-            *cached = find_claude();
-        }
-        cached.clone().ok_or("claude CLI not found")?
-    };
+    let exe = claude_exe(&state)?;
     let model = state.settings.lock().unwrap().model.clone();
+    let project = state.active_project();
+    // A file, not an argument: prompts can exceed Windows' command-line limit.
+    let prompt_file = state.dir.join("active-prompt.md");
+    std::fs::write(&prompt_file, &project.prompt).map_err(|e| e.to_string())?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("-p")
         .arg("--system-prompt-file")
-        .arg(state.prompt_path())
-        .args(["--tools", "", "--output-format", "text"]);
+        .arg(&prompt_file)
+        .args(["--tools", "", "--output-format", "json"]);
     if !model.is_empty() {
         cmd.args(["--model", &model]);
     }
@@ -253,7 +303,9 @@ async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Result
         return Err("cancelled".into());
     }
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() || stdout.is_empty() {
+    // claude exits non-zero on API/auth errors but still prints the JSON envelope.
+    let raw: Option<serde_json::Value> = serde_json::from_str(&stdout).ok();
+    if raw.is_none() && (!out.status.success() || stdout.is_empty()) {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err([stderr, stdout]
             .into_iter()
@@ -261,7 +313,27 @@ async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Result
             .unwrap_or_else(|| format!("claude exited with {}", out.status)));
     }
 
-    let response = strip_outer_fence(&stdout);
+    // JSON envelope: {"type":"result","is_error":…,"result":"…","usage":…,"total_cost_usd":…}
+    let text_out = match &raw {
+        Some(v) => {
+            let result = v.get("result").and_then(|r| r.as_str()).unwrap_or_default();
+            if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+                return Err(if !result.is_empty() {
+                    result.to_string()
+                } else if let Some(e) = v.get("errors").and_then(|e| e.as_array()).and_then(|a| a.first()) {
+                    e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())
+                } else {
+                    format!("claude error ({})", v.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown"))
+                });
+            }
+            result.to_string()
+        }
+        None => stdout.clone(),
+    };
+    if text_out.trim().is_empty() {
+        return Err(format!("Empty response from claude: {stdout}"));
+    }
+    let response = strip_outer_fence(&text_out);
     app.clipboard()
         .write_text(response.clone())
         .map_err(|e| e.to_string())?;
@@ -271,10 +343,13 @@ async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Result
         h.insert(
             0,
             HistoryItem {
-                id: uuid::Uuid::new_v4().to_string().to_uppercase(),
+                id: new_id(),
                 date: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 request: text,
                 response: response.clone(),
+                raw,
+                project: Some(project.name.clone()),
+                color: Some(project.color.clone()).filter(|c| !c.is_empty()),
             },
         );
         h.truncate(HISTORY_LIMIT);
@@ -282,6 +357,76 @@ async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Result
     };
     state.save_history();
     Ok(Answer { response, history })
+}
+
+fn claude_exe(state: &AppState) -> Result<String, String> {
+    let mut cached = state.claude.lock().unwrap();
+    if cached.is_none() {
+        *cached = find_claude();
+    }
+    cached.clone().ok_or_else(|| "claude CLI not found".into())
+}
+
+// ───────────────────────── account ─────────────────────────
+
+/// `claude auth status` → {loggedIn, email?, authMethod, …}
+#[tauri::command]
+async fn auth_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let exe = claude_exe(&state)?;
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(["auth", "status"])
+        .current_dir(&state.dir)
+        .env("PATH", augmented_path())
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.output().await.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|_| stdout.trim().to_string())
+}
+
+/// `claude auth login` needs a browser round-trip and may ask questions,
+/// so run it in a real terminal window.
+#[tauri::command]
+fn login(state: State<'_, AppState>) -> Result<(), String> {
+    let exe = claude_exe(&state)?;
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = state.dir.join("login.command");
+        let body = format!(
+            "#!/bin/bash\nclear\n'{exe}' auth login && '{exe}' auth status\necho\necho 'You can close this window.'\n",
+            exe = exe.replace('\'', "'\\''")
+        );
+        std::fs::write(&script, body).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+        std::process::Command::new("open").arg(&script).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", "cmd", "/k"])
+        .arg(&exe)
+        .args(["auth", "login"])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("x-terminal-emulator")
+        .args(["-e", &exe, "auth", "login"])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_usage() {
+    let url = "https://claude.ai/settings/usage";
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 #[tauri::command]
@@ -298,6 +443,7 @@ fn cancel(state: State<'_, AppState>) {
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     settings: Settings,
+    projects: Vec<Project>,
     history: Vec<HistoryItem>,
     compact: f64,
     platform: &'static str,
@@ -307,6 +453,7 @@ struct Snapshot {
 fn get_state(state: State<'_, AppState>) -> Snapshot {
     Snapshot {
         settings: state.settings.lock().unwrap().clone(),
+        projects: state.projects.lock().unwrap().clone(),
         history: state.history.lock().unwrap().clone(),
         compact: COMPACT,
         platform: std::env::consts::OS,
@@ -350,6 +497,10 @@ fn set_model(app: AppHandle, state: State<'_, AppState>, model: String) {
 fn set_opacity(app: AppHandle, state: State<'_, AppState>, value: f64) {
     state.settings.lock().unwrap().inactive_opacity = value.clamp(0.2, 1.0);
     broadcast_settings(&app, &state);
+    if let Some(win) = app.get_webview_window("main") {
+        let focused = win.is_focused().unwrap_or(true);
+        apply_alpha(&app, focused);
+    }
 }
 
 fn register_shortcut(app: &AppHandle, accel: &str) -> Result<(), String> {
@@ -383,15 +534,37 @@ fn resume_shortcut(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
     register_shortcut(&app, &accel)
 }
 
+/// Replace the whole project list (Settings window edits).
 #[tauri::command]
-fn edit_prompt(state: State<'_, AppState>) {
-    let path = state.prompt_path();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg("-e").arg(&path).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("notepad").arg(&path).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+fn save_projects(app: AppHandle, state: State<'_, AppState>, projects: Vec<Project>) -> Result<(), String> {
+    if projects.is_empty() {
+        return Err("Keep at least one project".into());
+    }
+    let ids_ok = {
+        let active = state.settings.lock().unwrap().active_project.clone();
+        projects.iter().any(|p| p.id == active)
+    };
+    if !ids_ok {
+        state.settings.lock().unwrap().active_project = projects[0].id.clone();
+        broadcast_settings(&app, &state);
+    }
+    *state.projects.lock().unwrap() = projects.clone();
+    state.save_projects();
+    let _ = app.emit("projects", projects);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_active_project(app: AppHandle, state: State<'_, AppState>, id: String) {
+    if state.projects.lock().unwrap().iter().any(|p| p.id == id) {
+        state.settings.lock().unwrap().active_project = id;
+        broadcast_settings(&app, &state);
+    }
+}
+
+#[tauri::command]
+fn new_project_id() -> String {
+    new_id()
 }
 
 #[tauri::command]
@@ -402,8 +575,9 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Fast Mode Settings")
-        .inner_size(440.0, 280.0)
-        .resizable(false)
+        .inner_size(560.0, 640.0)
+        .min_inner_size(460.0, 480.0)
+        .resizable(true)
         .minimizable(false)
         .always_on_top(true)
         .center()
@@ -449,9 +623,57 @@ fn resize(app: AppHandle, state: State<'_, AppState>, width: f64, height: f64) -
 
     let phys = LogicalPosition::new(x, y).to_physical::<i32>(scale);
     *state.last_set_pos.lock().unwrap() = Some((phys.x, phys.y));
-    win.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
-    win.set_position(phys).map_err(|e| e.to_string())?;
-    Ok(())
+    set_frame(&win, x, y, width, height)
+}
+
+/// macOS: one `setFrame:display:` call. Tauri's set_size + set_position are two async
+/// steps (and setContentSize keeps the bottom edge), so the panel visibly jumps.
+#[cfg(target_os = "macos")]
+fn set_frame(win: &tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    use objc2_app_kit::{NSScreen, NSWindow};
+    use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+
+    let ptr = win.ns_window().map_err(|e| e.to_string())? as usize;
+    win.run_on_main_thread(move || unsafe {
+        let mtm = MainThreadMarker::new_unchecked();
+        let ns_window = &*(ptr as *const NSWindow);
+        // Tauri uses top-left origin on the primary screen; Cocoa uses bottom-left.
+        let primary_h = NSScreen::screens(mtm)
+            .firstObject()
+            .map(|s| s.frame().size.height)
+            .unwrap_or(0.0);
+        let rect = NSRect::new(NSPoint::new(x, primary_h - y - h), NSSize::new(w, h));
+        ns_window.setFrame_display(rect, true);
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Inactive opacity via NSWindow.alphaValue: changing CSS opacity made WebKit rebuild
+/// its layers and the panel blinked on focus.
+#[cfg(target_os = "macos")]
+fn set_alpha(win: &tauri::WebviewWindow, alpha: f64) {
+    use objc2_app_kit::NSWindow;
+    let Ok(ptr) = win.ns_window() else { return };
+    let ptr = ptr as usize;
+    let _ = win.run_on_main_thread(move || unsafe {
+        (&*(ptr as *const NSWindow)).setAlphaValue(alpha);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_alpha(_win: &tauri::WebviewWindow, _alpha: f64) {}
+
+fn apply_alpha(app: &AppHandle, focused: bool) {
+    if let Some(win) = app.get_webview_window("main") {
+        let inactive = app.state::<AppState>().settings.lock().unwrap().inactive_opacity;
+        set_alpha(&win, if focused { 1.0 } else { inactive });
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_frame(win: &tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    win.set_size(tauri::LogicalSize::new(w, h)).map_err(|e| e.to_string())?;
+    win.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())
 }
 
 fn default_home(app: &AppHandle) -> (f64, f64) {
@@ -465,6 +687,49 @@ fn default_home(app: &AppHandle) -> (f64, f64) {
     (100.0, 100.0)
 }
 
+/// The panel is built in code (not tauri.conf.json) so macOS gets a WebKit config
+/// with Writing Tools ("Write with Siri") and inline predictions turned off.
+fn build_main_window(app: &tauri::App) -> tauri::Result<()> {
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Fast Mode")
+        .inner_size(COMPACT, COMPACT)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(true)
+        .always_on_top(true)
+        .visible_on_all_workspaces(true)
+        .skip_taskbar(true)
+        .accept_first_mouse(true)
+        .focused(true)
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.with_webview_configuration(webkit_config());
+    }
+    builder.build().map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn webkit_config() -> objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration> {
+    use objc2::{msg_send, runtime::NSObjectProtocol, sel};
+    let mtm = objc2_foundation::MainThreadMarker::new().expect("setup runs on the main thread");
+    #[allow(unused_unsafe)]
+    let config = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+    unsafe {
+        // NSWritingToolsBehaviorNone = -1 (macOS 15+)
+        if config.respondsToSelector(sel!(setWritingToolsBehavior:)) {
+            let _: () = msg_send![&*config, setWritingToolsBehavior: -1isize];
+        }
+        // macOS 14+
+        if config.respondsToSelector(sel!(setAllowsInlinePredictions:)) {
+            let _: () = msg_send![&*config, setAllowsInlinePredictions: false];
+        }
+    }
+    config
+}
+
 // ───────────────────────── global shortcut ─────────────────────────
 
 /// Send the clipboard to Claude via the main window, without stealing focus.
@@ -473,9 +738,8 @@ fn on_hotkey(app: &AppHandle) {
     if text.trim().is_empty() {
         return;
     }
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-    }
+    // No show()/focus here: the panel is always visible, and making it key while
+    // another app is active hid it until the request finished.
     let _ = app.emit_to("main", "hotkey-send", text);
 }
 
@@ -512,6 +776,8 @@ pub fn run() {
                 eprintln!("{e}");
             }
 
+            build_main_window(app)?;
+
             if let Some(win) = app.get_webview_window("main") {
                 let _ = resize(handle.clone(), state, COMPACT, COMPACT);
                 let _ = win.show();
@@ -522,6 +788,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
+            }
+            if let WindowEvent::Focused(focused) = event {
+                apply_alpha(window.app_handle(), *focused);
             }
             if let WindowEvent::Moved(pos) = event {
                 let state = window.state::<AppState>();
@@ -546,9 +815,14 @@ pub fn run() {
             set_shortcut,
             pause_shortcut,
             resume_shortcut,
-            edit_prompt,
+            save_projects,
+            set_active_project,
+            new_project_id,
             open_settings,
             resize,
+            auth_status,
+            login,
+            open_usage,
             quit
         ])
         .run(tauri::generate_context!())

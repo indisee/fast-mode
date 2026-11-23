@@ -32,17 +32,34 @@ const state = {
   settings: { model: "", inactiveOpacity: 0.7, shortcut: "" },
   showHistory: false,
   focused: true,
+  auth: null, // `claude auth status` JSON
+  projects: [],
+  hotkeyRun: false, // request came from the global shortcut → full-card spinner
 };
 let resetTimer = null;
 
 // ───────── rendering ─────────
 
+function busy() {
+  return state.status === "running" && state.hotkeyRun;
+}
+
 function expanded() {
+  if (busy()) return false;
   return input.value.length > 0 || state.showHistory || state.status === "error";
+}
+
+function activeProject() {
+  return state.projects.find((p) => p.id === state.settings.activeProject) ?? state.projects[0];
 }
 
 function render() {
   const wide = expanded();
+  card.classList.toggle("busy", busy());
+  const proj = activeProject();
+  if (proj?.color) card.style.setProperty("--proj-bg", `color-mix(in srgb, ${proj.color} 60%, transparent)`);
+  else card.style.removeProperty("--proj-bg");
+  card.title = proj && state.projects.length > 1 ? proj.name : "";
   card.classList.toggle("compact", !wide);
   card.classList.toggle("expanded", wide);
 
@@ -66,7 +83,16 @@ function render() {
   copyBtn.hidden = !state.lastResponse;
   errorEl.hidden = state.status !== "error";
   errorEl.textContent = state.error;
+  if (state.status === "error" && isAuthError(state.error)) {
+    const btn = document.createElement("button");
+    btn.className = "text-btn link";
+    btn.textContent = "Sign in…";
+    btn.addEventListener("click", signIn);
+    errorEl.append(" ", btn);
+  }
   historyEl.hidden = !state.showHistory;
+  $("history-head").hidden = !state.showHistory;
+  $("history-title").textContent = `History · ${state.history.length}`;
   if (state.showHistory) renderHistory();
 
   autosize();
@@ -99,7 +125,20 @@ function renderHistory() {
         <button class="icon cp" title="Copy request">${ICON.copy}</button></div>
       <div class="divider"></div>
       <div class="section response"><div class="body"><div class="label">RESPONSE</div><div class="text"></div></div>
-        <button class="icon cp" title="Copy response">${ICON.copy}</button></div>`;
+        <button class="icon cp" title="Copy response">${ICON.copy}</button></div>
+      <div class="raw-wrap">
+        <div class="divider"></div>
+        <div class="section raw"><div class="body"><div class="label">RAW JSON</div><pre class="json"></pre></div>
+          <button class="icon cp" title="Copy JSON">${ICON.copy}</button></div>
+      </div>`;
+    if (item.project) {
+      const tag = document.createElement("span");
+      tag.className = "proj";
+      tag.innerHTML = '<span class="dot"></span>';
+      tag.querySelector(".dot").style.background = item.color || "var(--faint)";
+      tag.append(item.project);
+      row.querySelector(".row-head").prepend(tag);
+    }
     row.querySelector(".date").textContent = new Date(item.date).toLocaleString(undefined, {
       dateStyle: "medium",
       timeStyle: "short",
@@ -107,9 +146,16 @@ function renderHistory() {
     row.querySelector(".request .text").textContent = item.request;
     row.querySelector(".response .text").textContent = item.response;
 
-    const [cpReq, cpRes] = row.querySelectorAll(".cp");
+    const [cpReq, cpRes, cpRaw] = row.querySelectorAll(".cp");
     wireCopy(cpReq, item.request);
     wireCopy(cpRes, item.response);
+    if (item.raw) {
+      const json = JSON.stringify(item.raw, null, 2);
+      row.querySelector(".json").textContent = json;
+      wireCopy(cpRaw, json);
+    } else {
+      row.querySelector(".raw-wrap").remove(); // entries from before JSON output
+    }
     row.querySelector(".del").addEventListener("click", async (e) => {
       e.stopPropagation();
       state.history = await invoke("delete_history", { id: item.id });
@@ -148,25 +194,73 @@ function setStatus(status, error = "") {
 // ───────── actions ─────────
 
 /** Send `override` (paste / hotkey) or the current input. */
-async function submit(override) {
-  if (state.status === "running") return;
+let inflight = null; // promise of the running `ask`
+let runId = 0;
+
+/** Send `override` (paste / hotkey) or the current input.
+ *  A hotkey request while one is running cancels it and starts right away. */
+async function submit(override, fromHotkey = false) {
+  if (state.status === "running") {
+    if (!fromHotkey) return;
+    const prev = inflight;
+    runId++; // mark the old run as superseded so it doesn't touch the UI
+    invoke("cancel");
+    await prev; // let the old process exit before starting a new one
+    if (state.status === "running") return; // another submit got in first
+  }
   const snapshot = input.value;
   const text = (override ?? snapshot).trim();
   if (!text) return;
+  const id = ++runId;
+  state.hotkeyRun = fromHotkey;
   setStatus("running");
+  const run = invoke("ask", { text });
+  inflight = run.catch(() => {});
   try {
-    const res = await invoke("ask", { text });
-    state.lastResponse = res.response;
+    const res = await run;
     state.history = res.history;
+    if (id !== runId) return render();
+    state.lastResponse = res.response;
     // Don't wipe something typed while waiting.
     if (override === undefined && input.value === snapshot) input.value = "";
     setStatus("copied");
   } catch (e) {
+    if (id !== runId) return; // superseded by a newer request
     const msg = String(e);
     if (msg === "cancelled") return setStatus("idle");
     if (!input.value) input.value = text; // keep the request so it isn't lost
     setStatus("error", msg);
   }
+}
+
+const AUTH_RE = /authenticat|oauth|not logged in|log ?in|\/login|api key|401/i;
+function isAuthError(msg) {
+  return AUTH_RE.test(msg);
+}
+
+async function refreshAuth() {
+  try {
+    state.auth = await invoke("auth_status");
+  } catch {
+    state.auth = null;
+  }
+}
+
+async function signIn() {
+  try {
+    await invoke("login");
+  } catch (e) {
+    setStatus("error", String(e));
+  }
+}
+
+function accountLabel() {
+  const a = state.auth;
+  if (!a) return "Account: unknown";
+  if (!a.loggedIn) return "Not signed in";
+  const who = a.email || a.account?.email || a.orgName || a.authMethod;
+  const plan = a.subscriptionType ? ` · ${a.subscriptionType}` : "";
+  return `${who}${plan}`;
 }
 
 function cancel() {
@@ -179,6 +273,7 @@ function toggleHistory() {
 }
 
 async function showMenu() {
+  await refreshAuth();
   const sep = () => PredefinedMenuItem.new({ item: "Separator" });
   const models = await Promise.all(
     MODELS.map(([text, value]) =>
@@ -189,8 +284,21 @@ async function showMenu() {
       }),
     ),
   );
+  const projects = await Promise.all(
+    state.projects.map((p) =>
+      CheckMenuItem.new({
+        text: p.name || "Untitled",
+        checked: p.id === activeProject()?.id,
+        action: () => invoke("set_active_project", { id: p.id }),
+      }),
+    ),
+  );
   const menu = await Menu.new({
     items: [
+      await Submenu.new({
+        text: `Project: ${activeProject()?.name ?? "—"}`,
+        items: [...projects, await sep(), await MenuItem.new({ text: "Edit Projects…", action: () => invoke("open_settings") })],
+      }),
       await Submenu.new({ text: "Model", items: models }),
       await sep(),
       await MenuItem.new({
@@ -198,8 +306,14 @@ async function showMenu() {
         action: toggleHistory,
       }),
       await sep(),
+      await MenuItem.new({ text: accountLabel(), enabled: false }),
+      await MenuItem.new({
+        text: state.auth?.loggedIn ? "Switch Account…" : "Sign In…",
+        action: signIn,
+      }),
+      await MenuItem.new({ text: "Usage & Limits…", action: () => invoke("open_usage") }),
+      await sep(),
       await MenuItem.new({ text: "Settings…", action: () => invoke("open_settings") }),
-      await MenuItem.new({ text: "Edit System Prompt…", action: () => invoke("edit_prompt") }),
       await MenuItem.new({
         text: "Clear History",
         action: async () => {
@@ -215,7 +329,9 @@ async function showMenu() {
   await menu.popup();
 }
 
+// macOS: opacity is NSWindow.alphaValue (set natively — no WebKit repaint/blink).
 function applyOpacity() {
+  if (state.platform === "macos") return;
   document.body.style.opacity = state.focused ? "1" : String(state.settings.inactiveOpacity);
 }
 
@@ -248,7 +364,9 @@ document.addEventListener("keydown", (e) => {
 });
 
 statusEl.addEventListener("click", cancel);
+$("busy").addEventListener("click", cancel);
 $("gear").addEventListener("click", showMenu);
+$("history-hide").addEventListener("click", toggleHistory);
 copyBtn.addEventListener("click", async () => {
   if (!state.lastResponse) return;
   await invoke("copy_text", { text: state.lastResponse });
@@ -270,15 +388,22 @@ new ResizeObserver(() => {
 (async () => {
   const snap = await invoke("get_state");
   state.settings = snap.settings;
+  state.projects = snap.projects;
   state.history = snap.history;
+  state.platform = snap.platform;
   render();
   applyOpacity();
   input.focus();
 
-  await listen("hotkey-send", (e) => submit(e.payload));
+  await listen("hotkey-send", (e) => submit(e.payload, true));
   await listen("settings", (e) => {
     state.settings = e.payload;
     applyOpacity();
+    render();
+  });
+  await listen("projects", (e) => {
+    state.projects = e.payload;
+    render();
   });
   await getCurrentWindow().onFocusChanged(({ payload }) => {
     state.focused = payload;

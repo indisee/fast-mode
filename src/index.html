@@ -10,7 +10,7 @@
   <div id="card" class="compact" data-tauri-drag-region>
     <div id="box">
       <textarea id="input" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off"
-                autocomplete="off" writingsuggestions="false"></textarea>
+                autocomplete="off" writingsuggestions="false" placeholder=" "></textarea>
     </div>
 
     <div id="footer" data-tauri-drag-region>
@@ -31,7 +31,12 @@
       </button>
     </div>
 
+    <div id="busy" title="Thinking… Click or press Esc to cancel"><div class="spinner big"></div></div>
     <div id="error" hidden></div>
+    <div id="history-head" hidden>
+      <span id="history-title"></span>
+      <button id="history-hide" class="text-btn">Hide</button>
+    </div>
     <div id="history" hidden></div>
   </div>
 

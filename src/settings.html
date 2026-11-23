@@ -28,6 +28,35 @@
     .ctrl { display: flex; align-items: center; gap: 6px; }
     input[type=range] { width: 140px; }
     .val { width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; }
+    h2 { font-size: 11px; font-weight: 600; color: var(--muted); margin: 8px 4px 6px; text-transform: uppercase; letter-spacing: .04em; }
+    #projects { flex: 1; min-height: 0; display: flex; margin-bottom: 0; }
+    #plist { width: 150px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+    #plist ul { list-style: none; margin: 0; padding: 4px; flex: 1; overflow-y: auto; }
+    #plist li { display: flex; align-items: center; gap: 7px; padding: 5px 7px; border-radius: 5px; }
+    #plist li.sel { background: var(--accent); color: #fff; }
+    #plist li.sel .dot { box-shadow: 0 0 0 1.5px #fff; }
+    #plist li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #plist li .on { font-size: 11px; opacity: .8; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(128,128,128,.45); }
+    .bar { display: flex; border-top: 1px solid var(--line); }
+    .bar button { border: 0; background: none; width: 28px; height: 24px; font-size: 15px; color: var(--muted); }
+    .bar button:hover { color: var(--text); }
+    #editor { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field > label { color: var(--muted); font-size: 11px; }
+    input[type=text], textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+      border-radius: 6px; padding: 5px 7px; outline: none; -webkit-user-select: text; user-select: text; }
+    input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+    textarea { flex: 1; resize: none; font: 12px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 120px; }
+    .field.grow { flex: 1; min-height: 0; }
+    .swatches { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .sw { width: 18px; height: 18px; border-radius: 50%; border: 0; padding: 0; box-shadow: inset 0 0 0 1px rgba(128,128,128,.45); }
+    .sw.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .sw.none { background: linear-gradient(135deg, transparent 45%, var(--red) 45%, var(--red) 55%, transparent 55%); }
+    input[type=color] { width: 22px; height: 22px; border: 0; padding: 0; background: none; }
+    .ed-head { display: flex; justify-content: space-between; align-items: center; }
   </style>
 </head>
 <body>
@@ -59,9 +88,24 @@
       <span>Opacity when not focused</span>
       <span class="ctrl"><input id="opacity" type="range" min="0.2" max="1" step="0.05" /><span id="opval" class="val"></span></span>
     </div>
-    <div class="row">
-      <span>System prompt</span>
-      <button id="prompt">Edit…</button>
+  </div>
+
+  <h2>Projects</h2>
+  <div id="projects" class="group">
+    <div id="plist">
+      <ul id="pitems"></ul>
+      <div class="bar">
+        <button id="padd" title="New project">+</button>
+        <button id="pdel" title="Delete project">−</button>
+      </div>
+    </div>
+    <div id="editor">
+      <div class="ed-head">
+        <div class="field" style="flex:1"><label>Name</label><input id="pname" type="text" spellcheck="false" /></div>
+      </div>
+      <div class="field"><label>Color</label><div id="pcolors" class="swatches"></div></div>
+      <div class="field grow"><label>System prompt</label><textarea id="pprompt" spellcheck="false" writingsuggestions="false"></textarea></div>
+      <div class="ed-head"><span id="pstate" style="color:var(--muted)"></span><button id="puse">Use This Project</button></div>
     </div>
   </div>
 
@@ -145,14 +189,104 @@
       $("opval").textContent = Math.round(e.target.value * 100) + "%";
       invoke("set_opacity", { value: Number(e.target.value) });
     });
-    $("prompt").addEventListener("click", () => invoke("edit_prompt"));
+
+    // ── projects ──
+    const COLORS = ["", "#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#bf5af2", "#ff2d55", "#8e8e93"];
+    let projects = [], sel = null, saveTimer = null, delArmed = false;
+    function disarm() { delArmed = false; $("pdel").textContent = "−"; $("pdel").style.cssText = ""; }
+    const cur = () => projects.find((p) => p.id === sel);
+
+    function renderProjects() {
+      if (!cur()) sel = (projects.find((p) => p.id === settings.activeProject) ?? projects[0])?.id;
+      $("pitems").replaceChildren(...projects.map((p) => {
+        const li = document.createElement("li");
+        li.className = p.id === sel ? "sel" : "";
+        li.innerHTML = '<span class="dot"></span><span class="name"></span><span class="on"></span>';
+        li.querySelector(".dot").style.background = p.color || "transparent";
+        li.querySelector(".name").textContent = p.name || "Untitled";
+        li.querySelector(".on").textContent = p.id === settings.activeProject ? "✓" : "";
+        li.addEventListener("click", () => { disarm(); sel = p.id; renderProjects(); renderEditor(); });
+        return li;
+      }));
+      $("pdel").disabled = projects.length < 2;
+    }
+
+    function renderEditor() {
+      const p = cur();
+      if (!p) return;
+      if (document.activeElement !== $("pname")) $("pname").value = p.name;
+      if (document.activeElement !== $("pprompt")) $("pprompt").value = p.prompt;
+      const custom = p.color && !COLORS.includes(p.color);
+      $("pcolors").replaceChildren(
+        ...COLORS.map((c) => {
+          const b = document.createElement("button");
+          b.className = "sw" + (c ? "" : " none") + (p.color === c ? " sel" : "");
+          if (c) b.style.background = c;
+          b.title = c || "No color";
+          b.addEventListener("click", () => update({ color: c }));
+          return b;
+        }),
+        Object.assign(document.createElement("input"), { type: "color", value: custom ? p.color : "#888888", title: "Custom color",
+          className: custom ? "sel" : "", oninput: (e) => update({ color: e.target.value }) }),
+      );
+      const active = p.id === settings.activeProject;
+      $("puse").hidden = active;
+      $("pstate").textContent = active ? "Active project" : "";
+    }
+
+    function update(patch, rerenderEditor = true) {
+      Object.assign(cur(), patch);
+      renderProjects();
+      if (rerenderEditor) renderEditor();
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => invoke("save_projects", { projects }), 300);
+    }
+
+    $("pname").addEventListener("input", (e) => update({ name: e.target.value }, false));
+    $("pprompt").addEventListener("input", (e) => update({ prompt: e.target.value }, false));
+    $("padd").addEventListener("click", () => {
+      const p = { id: crypto.randomUUID().toUpperCase(), name: "New Project", prompt: "", color: "" };
+      projects.push(p);
+      sel = p.id;
+      update({});
+      $("pname").focus();
+      $("pname").select();
+    });
+    $("pdel").addEventListener("click", () => {
+      const p = cur();
+      if (!p || projects.length < 2) return;
+      // Two clicks to delete (WebView has no confirm dialog).
+      if (!delArmed) {
+        delArmed = true;
+        $("pdel").textContent = "Delete?";
+        $("pdel").style.cssText = "width:auto;padding:0 8px;color:var(--red);font-size:12px";
+        setTimeout(disarm, 2500);
+        return;
+      }
+      disarm();
+      projects = projects.filter((x) => x.id !== p.id);
+      sel = null;
+      clearTimeout(saveTimer);
+      invoke("save_projects", { projects });
+      renderProjects();
+      renderEditor();
+    });
+    $("puse").addEventListener("click", () => invoke("set_active_project", { id: sel }));
 
     (async () => {
       const snap = await invoke("get_state");
       settings = snap.settings;
       platform = snap.platform;
+      projects = snap.projects;
       render();
-      await listen("settings", (e) => { settings = e.payload; if (!recording) render(); });
+      renderProjects();
+      renderEditor();
+      await listen("settings", (e) => {
+        settings = e.payload;
+        if (!recording) render();
+        renderProjects();
+        renderEditor();
+      });
     })();
   </script>
 </body>

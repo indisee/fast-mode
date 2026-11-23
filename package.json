@@ -5,7 +5,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "install:mac": "tauri build && pkill -f 'Fast Mode.app/Contents/MacOS'; ditto 'src-tauri/target/release/bundle/macos/Fast Mode.app' '/Applications/Fast Mode.app' && open -a '/Applications/Fast Mode.app'"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4"
