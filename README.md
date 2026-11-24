@@ -1,18 +1,17 @@
 # Fast Mode
 
-```mermaid
-flowchart LR
-  A["⌘C"]:::a --> B["Hotkey (⌃⌥V)"]:::b --> C["claude -p {magic}"]:::c --> D["Clipboard"]:::d --> E["⌘V"]:::e
-  classDef a fill:#e5e5ea,stroke:#8e8e93,color:#1d1d1f
-  classDef b fill:#0a84ff,stroke:#0060df,color:#fff
-  classDef c fill:#ff9f0a,stroke:#c77700,color:#fff
-  classDef d fill:#34c759,stroke:#248a3d,color:#fff
-  classDef e fill:#e5e5ea,stroke:#8e8e93,color:#1d1d1f
-```
+<img src="docs/screenshots/flow.png" width="637" alt="⌘C → Hotkey → claude -p {magic} → Clipboard → ⌘V">
 
-A small always-on-top panel for jobs you keep asking Claude to do the same way. Each **project** is a system prompt with a color: rewrite in polite English, write a commit message, summarize a thread, and so on.
+A small always-on-top panel for jobs you keep asking Claude to do the same way.
 
-<p align="center"><img src="docs/screenshots/typing.png" width="476" alt="Rough English typed into the panel"></p>
+- **Each project is a system prompt**: rewrite in polite English, summarize a thread, and so on.
+- **No API key needed**: it runs through Claude Code with your Claude subscription.
+- **Type, paste, or use a system-wide shortcut** from any app.
+- **The reply goes straight to the clipboard**, ready to paste.
+- **Switch the model** (Haiku, Sonnet, Opus) from the ⚙ menu.
+- **History** keeps every request and reply, with cost and token usage.
+
+<img src="docs/screenshots/typing.png" width="476" alt="Rough English typed into the panel">
 
 **`{magic}`:** the active project's system prompt. The default one is "Rewrite the text in natural, polite English. Translate it if it's in another language. Output only the result."
 
@@ -22,7 +21,7 @@ A small always-on-top panel for jobs you keep asking Claude to do the same way. 
 
 **History:**
 
-<p align="center"><img src="docs/screenshots/result.png" width="476" alt="The same text rewritten in polished English"></p>
+<img src="docs/screenshots/result.png" width="476" alt="The same text rewritten in polished English">
 
 | <img src="docs/screenshots/compact.png" width="100"> | <img src="docs/screenshots/busy.png" width="100"> | <img src="docs/screenshots/copied.png" width="100"> |
 | :-: | :-: | :-: |
@@ -35,10 +34,8 @@ A small always-on-top panel for jobs you keep asking Claude to do the same way. 
 - **Esc** cancels.
 - **⚙** switches the project and model, and opens history and settings.
 
-<p align="center">
-  <img src="docs/screenshots/history.png" width="380" alt="History">
-  <img src="docs/screenshots/settings.png" width="380" alt="Settings">
-</p>
+<img src="docs/screenshots/history.png" width="380" alt="History">
+<img src="docs/screenshots/settings.png" width="380" alt="Settings">
 
 ## Install
 
