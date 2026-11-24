@@ -55,3 +55,7 @@ npm run install:mac
 ```
 
 Use `npm run dev` while developing and `cargo test` in `src-tauri` for the unit tests.
+
+## License
+
+[MIT](LICENSE)
