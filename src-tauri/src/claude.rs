@@ -34,22 +34,37 @@ fn find_claude() -> Option<String> {
     platform::which_claude()
 }
 
-/// Path to `claude`, looked up once and cached.
-pub fn claude_exe(state: &AppState) -> Result<String, String> {
-    let mut cached = state.claude.lock().unwrap();
-    if cached.is_none() {
-        *cached = find_claude();
+/// Path to `claude`, cached. Looked up again if the cached file is gone (the CLI
+/// moved after an update). The lookup may run a login shell, so it runs on a
+/// blocking thread with no lock held.
+pub async fn claude_exe(state: &AppState) -> Result<String, String> {
+    if let Some(p) = state.claude.lock().unwrap().clone() {
+        if std::path::Path::new(&p).is_file() {
+            return Ok(p);
+        }
     }
-    cached.clone().ok_or_else(|| "claude CLI not found".into())
+    let found = tauri::async_runtime::spawn_blocking(find_claude)
+        .await
+        .ok()
+        .flatten();
+    *state.claude.lock().unwrap() = found.clone();
+    found.ok_or_else(|| "claude CLI not found".into())
 }
 
 /// The prompt wraps markdown in ``` for chat UIs; the clipboard wants the raw text.
+/// Only a single block that wraps the whole reply is unwrapped: a reply with
+/// several blocks (or nothing inside the fence) is kept as is.
 fn strip_outer_fence(s: &str) -> String {
     let t = s.trim();
-    if t.len() > 6 && t.starts_with("```") && t.ends_with("```") {
-        let lines: Vec<&str> = t.lines().collect();
-        if lines.len() >= 2 {
-            return lines[1..lines.len() - 1].join("\n").trim().to_string();
+    let lines: Vec<&str> = t.lines().collect();
+    if lines.len() >= 3
+        && lines[0].starts_with("```")
+        && lines[lines.len() - 1].trim() == "```"
+        && !lines[1..lines.len() - 1].iter().any(|l| l.trim_start().starts_with("```"))
+    {
+        let inner = lines[1..lines.len() - 1].join("\n").trim().to_string();
+        if !inner.is_empty() {
+            return inner;
         }
     }
     t.to_string()
@@ -110,7 +125,9 @@ pub async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Re
     if text.is_empty() {
         return Err("Nothing to send".into());
     }
-    let exe = claude_exe(&state)?;
+    // Reset before the (possibly slow) lookup so a cancel during it still counts.
+    state.cancelled.store(false, Ordering::SeqCst);
+    let exe = claude_exe(&state).await?;
     let model = state.settings.lock().unwrap().model.clone();
     let project = state.active_project();
     // A file, not an argument: prompts can exceed Windows' command-line limit.
@@ -134,9 +151,15 @@ pub async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Re
         .kill_on_drop(true);
     platform::hide_console(&mut cmd);
 
-    state.cancelled.store(false, Ordering::SeqCst);
+    if state.cancelled.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
     let mut child = cmd.spawn().map_err(|e| format!("Failed to launch claude: {e}"))?;
     *state.child_pid.lock().unwrap() = child.id();
+    // A cancel that came in before the pid was recorded couldn't kill it.
+    if state.cancelled.load(Ordering::SeqCst) {
+        let _ = child.start_kill();
+    }
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes()).await;
     }
@@ -180,8 +203,9 @@ pub async fn ask(app: AppHandle, state: State<'_, AppState>, text: String) -> Re
 
 #[tauri::command]
 pub fn cancel(state: State<'_, AppState>) {
+    // Always flag it: `ask` checks the flag before spawning and right after.
+    state.cancelled.store(true, Ordering::SeqCst);
     if let Some(pid) = *state.child_pid.lock().unwrap() {
-        state.cancelled.store(true, Ordering::SeqCst);
         platform::kill_pid(pid);
     }
 }
@@ -200,6 +224,18 @@ mod tests {
     fn plain_text_is_kept() {
         assert_eq!(strip_outer_fence("  Hello there  "), "Hello there");
         assert_eq!(strip_outer_fence("use ``` inline"), "use ``` inline");
+    }
+
+    #[test]
+    fn several_blocks_are_kept() {
+        let s = "```bash\na\n```\nThen run:\n```bash\nb\n```";
+        assert_eq!(strip_outer_fence(s), s);
+    }
+
+    #[test]
+    fn empty_fence_is_kept() {
+        assert_eq!(strip_outer_fence("```\n```"), "```\n```");
+        assert_eq!(strip_outer_fence("```\n\n```"), "```\n\n```");
     }
 
     #[test]

@@ -38,10 +38,15 @@ fn which_in_login_shell() -> Option<String> {
         .args(["-lc", "command -v claude"])
         .output()
         .ok()?;
-    first_line(&out.stdout)
+    first_existing_file(&out.stdout)
 }
 
-fn first_line(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8_lossy(bytes);
-    s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
+/// First output line that is an existing file. Login shells can print banners
+/// or notices before the path, so the first line alone isn't trusted.
+fn first_existing_file(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && std::path::Path::new(l).is_file())
+        .map(str::to_string)
 }

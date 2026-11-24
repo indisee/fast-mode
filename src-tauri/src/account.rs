@@ -13,7 +13,7 @@ use crate::{
 /// `claude auth status` → {loggedIn, email?, authMethod, …}
 #[tauri::command]
 pub async fn auth_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let exe = claude_exe(&state)?;
+    let exe = claude_exe(&state).await?;
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(["auth", "status"])
         .current_dir(&state.dir)
@@ -22,14 +22,24 @@ pub async fn auth_status(state: State<'_, AppState>) -> Result<serde_json::Value
     platform::hide_console(&mut cmd);
     let out = cmd.output().await.map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(stdout.trim()).map_err(|_| stdout.trim().to_string())
+    let stdout = stdout.trim();
+    serde_json::from_str(stdout).map_err(|_| {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if !stdout.is_empty() {
+            stdout.to_string()
+        } else if !stderr.is_empty() {
+            stderr
+        } else {
+            format!("claude auth status exited with {}", out.status)
+        }
+    })
 }
 
 /// `claude auth login` needs a browser round-trip and may ask questions,
 /// so run it in a real terminal window.
 #[tauri::command]
-pub fn login(state: State<'_, AppState>) -> Result<(), String> {
-    let exe = claude_exe(&state)?;
+pub async fn login(state: State<'_, AppState>) -> Result<(), String> {
+    let exe = claude_exe(&state).await?;
     platform::open_login_terminal(&exe, &state.dir)
 }
 

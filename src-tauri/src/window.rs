@@ -2,6 +2,8 @@
 
 use tauri::{AppHandle, LogicalPosition, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+use std::sync::atomic::Ordering;
+
 use crate::{platform, state::AppState};
 
 /// Side of the idle (compact) panel, in logical pixels.
@@ -76,6 +78,18 @@ pub fn build_main(app: &tauri::App) -> tauri::Result<()> {
     platform::configure_main_window(builder).build().map(|_| ())
 }
 
+/// A drag sends many Moved events; write settings.json once it settles.
+fn save_home_soon(app: AppHandle) {
+    let gen = app.state::<AppState>().home_save_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let state = app.state::<AppState>();
+        if state.home_save_gen.load(Ordering::SeqCst) == gen {
+            state.save_settings();
+        }
+    });
+}
+
 /// Main-window events: opacity on focus change, remember where the user dragged it.
 pub fn on_event(window: &tauri::Window, event: &WindowEvent) {
     if window.label() != "main" {
@@ -91,7 +105,7 @@ pub fn on_event(window: &tauri::Window, event: &WindowEvent) {
             let scale = window.scale_factor().unwrap_or(1.0);
             let l = pos.to_logical::<f64>(scale);
             state.settings.lock().unwrap().home = Some((l.x, l.y));
-            state.save_settings();
+            save_home_soon(window.app_handle().clone());
         }
     }
 }

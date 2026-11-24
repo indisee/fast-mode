@@ -81,8 +81,13 @@ $("opacity").addEventListener("input", (e) => {
 
 // ── projects ──
 const COLORS = ["", "#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#bf5af2", "#ff2d55", "#8e8e93"];
-let projects = [], sel = null, saveTimer = null, delArmed = false;
-function disarm() { delArmed = false; $("pdel").textContent = "−"; $("pdel").style.cssText = ""; }
+let projects = [], sel = null, saveTimer = null, delArmed = false, disarmTimer = null;
+function disarm() {
+  clearTimeout(disarmTimer);
+  delArmed = false;
+  $("pdel").textContent = "−";
+  $("pdel").style.cssText = "";
+}
 const cur = () => projects.find((p) => p.id === sel);
 
 function renderProjects() {
@@ -128,7 +133,15 @@ function update(patch, rerenderEditor = true) {
   renderProjects();
   if (rerenderEditor) renderEditor();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => invoke("save_projects", { projects }), 300);
+  saveTimer = setTimeout(flushProjects, 300);
+}
+
+/** Send a pending debounced save now. */
+function flushProjects() {
+  if (saveTimer === null) return Promise.resolve();
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  return invoke("save_projects", { projects }).catch(() => {});
 }
 
 $("pname").addEventListener("input", (e) => update({ name: e.target.value }, false));
@@ -149,18 +162,22 @@ $("pdel").addEventListener("click", () => {
     delArmed = true;
     $("pdel").textContent = "Delete?";
     $("pdel").style.cssText = "width:auto;padding:0 8px;color:var(--red);font-size:12px";
-    setTimeout(disarm, 2500);
+    disarmTimer = setTimeout(disarm, 2500);
     return;
   }
   disarm();
   projects = projects.filter((x) => x.id !== p.id);
   sel = null;
   clearTimeout(saveTimer);
+  saveTimer = null;
   invoke("save_projects", { projects });
   renderProjects();
   renderEditor();
 });
 $("puse").addEventListener("click", () => invoke("set_active_project", { id: sel }));
+
+// Closing within 300 ms of an edit would drop it: save before the window goes.
+window.__TAURI__.window.getCurrentWindow().onCloseRequested(() => flushProjects());
 
 (async () => {
   const snap = await invoke("get_state");

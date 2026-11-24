@@ -16,7 +16,7 @@ pub fn claude_bin_dirs() -> Vec<PathBuf> {
 
 pub fn which_claude() -> Option<String> {
     let out = std::process::Command::new("where").arg("claude").output().ok()?;
-    super::first_line(&out.stdout)
+    super::first_existing_file(&out.stdout)
 }
 
 pub fn setup(_app: &mut tauri::App) {}

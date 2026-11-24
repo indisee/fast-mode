@@ -2,7 +2,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Mutex,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -94,6 +97,8 @@ pub struct AppState {
     pub last_set_pos: Mutex<Option<(i32, i32)>>,
     /// Cached path to the `claude` executable.
     pub claude: Mutex<Option<String>>,
+    /// Bumped on every drag move; only the last move's delayed save writes.
+    pub home_save_gen: AtomicU64,
 }
 
 impl AppState {
@@ -130,6 +135,7 @@ impl AppState {
             cancelled: AtomicBool::new(false),
             last_set_pos: Mutex::new(None),
             claude: Mutex::new(None),
+            home_save_gen: AtomicU64::new(0),
         }
     }
 
