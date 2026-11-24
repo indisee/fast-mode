@@ -39,6 +39,9 @@ A small always-on-top panel for jobs you keep asking Claude to do the same way.
 
 ## Install
 
+> [!WARNING]
+> **macOS only.** The code has Windows and Linux branches (`src-tauri/src/platform/`), but they have never been built or run there. Expect them not to work.
+
 Needs [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and signed in. Fast Mode runs `claude -p` with your account, so no API key is needed.
 
 To build from source you also need Node.js and [Rust](https://tauri.app/start/prerequisites/).
@@ -51,4 +54,4 @@ npm install
 npm run install:mac
 ```
 
-On Windows or Linux use `npm run build`, and `npm run dev` while developing.
+Use `npm run dev` while developing and `cargo test` in `src-tauri` for the unit tests.
