@@ -58,6 +58,16 @@ npm run install:mac
 
 Use `npm run dev` while developing and `cargo test` in `src-tauri` for the unit tests.
 
+### Release
+
+Bump `version` in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, commit, then:
+
+```bash
+npm run release:mac -- --publish
+```
+
+[`scripts/release-mac.sh`](scripts/release-mac.sh) builds the universal app, signs it with a Developer ID, notarizes it, and writes the `.dmg` and `.zip` to `dist/release-<version>/`. With `--publish` it pushes and creates the GitHub release. Signing and notarization use the Apple account signed in to Xcode, so no passwords or API keys are needed. Without `--publish` it only builds.
+
 ## License
 
 [MIT](LICENSE)
