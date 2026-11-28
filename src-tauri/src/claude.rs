@@ -70,6 +70,31 @@ fn strip_outer_fence(s: &str) -> String {
     t.to_string()
 }
 
+/// With `verbose` on (CLI flag or `"verbose": true` in ~/.claude/settings.json),
+/// `--output-format json` prints an array of every event instead of the single
+/// result envelope. Pick the last `"type":"result"` element out of it.
+fn result_envelope(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Array(items) => {
+            let found = items
+                .iter()
+                .rev()
+                .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("result"))
+                .cloned();
+            found.unwrap_or(serde_json::Value::Array(items))
+        }
+        other => other,
+    }
+}
+
+/// Keep error messages short: the first `max` chars, then an ellipsis.
+fn clip(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
+}
+
 /// Turn the CLI's output into (reply text, raw JSON envelope) or an error message.
 ///
 /// The envelope looks like `{"type":"result","is_error":…,"result":"…","usage":…,"total_cost_usd":…}`.
@@ -81,7 +106,7 @@ fn parse_output(
     status: &str,
 ) -> Result<(String, Option<serde_json::Value>), String> {
     let stdout = stdout.trim();
-    let raw: Option<serde_json::Value> = serde_json::from_str(stdout).ok();
+    let raw: Option<serde_json::Value> = serde_json::from_str(stdout).ok().map(result_envelope);
     if raw.is_none() && (!success || stdout.is_empty()) {
         return Err([stderr.trim(), stdout]
             .into_iter()
@@ -107,7 +132,7 @@ fn parse_output(
         None => stdout.to_string(),
     };
     if text_out.trim().is_empty() {
-        return Err(format!("Empty response from claude: {stdout}"));
+        return Err(format!("Empty response from claude: {}", clip(stdout, 300)));
     }
     Ok((strip_outer_fence(&text_out), raw))
 }
@@ -272,6 +297,28 @@ mod tests {
         let (text, raw) = parse_output("plain reply\n", "", true, "").unwrap();
         assert_eq!(text, "plain reply");
         assert!(raw.is_none());
+    }
+
+    #[test]
+    fn verbose_array_uses_result_event() {
+        let out = r#"[{"type":"system","subtype":"init","cwd":"/x"},{"type":"assistant","message":{}},{"type":"result","is_error":false,"result":"Hi!","total_cost_usd":0.01}]"#;
+        let (text, raw) = parse_output(out, "", true, "exit status: 0").unwrap();
+        assert_eq!(text, "Hi!");
+        assert_eq!(raw.unwrap()["type"], "result");
+    }
+
+    #[test]
+    fn verbose_array_error_is_reported() {
+        let out = r#"[{"type":"system","subtype":"init"},{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}]"#;
+        assert_eq!(parse_output(out, "", false, "exit status: 1").unwrap_err(), "Not logged in · Please run /login");
+    }
+
+    #[test]
+    fn empty_response_error_is_clipped() {
+        let out = format!(r#"[{{"type":"system","cwd":"{}"}}]"#, "a".repeat(1000));
+        let err = parse_output(&out, "", true, "").unwrap_err();
+        assert!(err.starts_with("Empty response from claude"));
+        assert!(err.chars().count() < 400);
     }
 
     #[test]
