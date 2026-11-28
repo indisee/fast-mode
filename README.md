@@ -44,6 +44,8 @@ A small always-on-top panel for jobs you keep asking Claude to do the same way.
 
 Needs [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and signed in. Fast Mode runs `claude -p` with your account, so no API key is needed.
 
+**Download** the latest `.dmg` from [Releases](https://github.com/indisee/fast-mode/releases/latest) and drag Fast Mode to Applications. It is a universal build (Apple Silicon and Intel, macOS 11+), signed with a Developer ID and notarized by Apple, so it opens like any other app.
+
 To build from source you also need Node.js and [Rust](https://tauri.app/start/prerequisites/).
 
 ```bash
